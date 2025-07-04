@@ -49,7 +49,9 @@ set(UNIT_TESTS_FILES
   endianness.c
   task_map.c
   strptime.c
-  )
+  storage_inherit.c
+  unicode.c
+)
 
 # Config format
 set(UNIT_TESTS_FILES

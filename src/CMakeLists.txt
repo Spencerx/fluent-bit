@@ -348,10 +348,6 @@ endif()
 
 if(FLB_UNICODE_ENCODER)
   add_subdirectory(simdutf)
-  set(src
-    ${src}
-    "flb_unicode.c"
-    )
 endif()
 
 # WAMRC compiler
@@ -464,6 +460,17 @@ if(FLB_STREAM_PROCESSOR)
     )
 endif()
 
+# Unicode Conversions
+add_subdirectory(unicode)
+set(FLB_DEPS
+  ${FLB_DEPS}
+  flb-conv
+  )
+set(src
+  ${src}
+  flb_unicode.c
+  )
+
 if (MSVC)
 set(flb_rc_files
   ${CMAKE_CURRENT_BINARY_DIR}/version.rc
@@ -548,6 +555,11 @@ if(FLB_BINARY)
   endif()
 
   target_link_libraries(fluent-bit-bin fluent-bit-static ${CMAKE_THREAD_LIBS_INIT})
+
+  # KAFKA SPECIFIC
+  if(FLB_SASL_ENABLED)
+    target_link_libraries(fluent-bit-bin sasl2)
+  endif()
 
   set_target_properties(fluent-bit-bin
     PROPERTIES

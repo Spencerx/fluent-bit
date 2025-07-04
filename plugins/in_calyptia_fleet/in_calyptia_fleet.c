@@ -63,6 +63,7 @@
 static int fleet_cur_chdir(struct flb_in_calyptia_fleet_config *ctx);
 static int get_calyptia_files(struct flb_in_calyptia_fleet_config *ctx,
                               time_t timestamp);
+static void in_calyptia_fleet_destroy(struct flb_in_calyptia_fleet_config *ctx);
 
 #ifndef FLB_SYSTEM_WINDOWS
 
@@ -633,8 +634,6 @@ static int execute_reload(struct flb_in_calyptia_fleet_config *ctx, flb_sds_t cf
         flb_plg_error(ctx->ins, "unable to change to configuration directory");
     }
 
-    fleet_cur_chdir(ctx);
-
     pthread_attr_init(&ptha);
     pthread_attr_setdetachstate(&ptha, PTHREAD_CREATE_DETACHED);
     pthread_create(&pth, &ptha, do_reload, reload);
@@ -857,6 +856,7 @@ static struct flb_http_client *fleet_http_do(struct flb_in_calyptia_fleet_config
     size_t b_sent;
     struct flb_connection *u_conn;
     struct flb_http_client *client;
+    flb_sds_t config_version;
 
     if (ctx == NULL || url == NULL) {
         return NULL;
@@ -877,6 +877,13 @@ static struct flb_http_client *fleet_http_do(struct flb_in_calyptia_fleet_config
     }
 
     flb_http_buffer_size(client, ctx->max_http_buffer_size);
+
+    config_version = flb_sds_create_size(32);
+    flb_sds_printf(&config_version, "%ld", ctx->config_timestamp);
+    flb_http_add_header(client,
+                         FLEET_HEADERS_CONFIG_VERSION, sizeof(FLEET_HEADERS_CONFIG_VERSION) -1,
+                         config_version, flb_sds_len(config_version));
+    flb_sds_destroy(config_version);
 
     flb_http_add_header(client,
                         CALYPTIA_HEADERS_PROJECT, sizeof(CALYPTIA_HEADERS_PROJECT) - 1,
@@ -1617,10 +1624,17 @@ static flb_sds_t get_fleet_id_from_header(struct flb_in_calyptia_fleet_config *c
     flb_sds_t fleet_id;
     flb_sds_t name;
     struct flb_cf *cf_hdr;
+    flb_sds_t cfgheadername;
 
 
     if (exists_header_fleet_config(ctx)) {
-        cf_hdr = flb_cf_create_from_file(NULL, hdr_fleet_config_filename(ctx));
+        cfgheadername = hdr_fleet_config_filename(ctx);
+        if (cfgheadername == NULL) {
+            return NULL;
+        }
+
+        cf_hdr = flb_cf_create_from_file(NULL, cfgheadername);
+        flb_sds_destroy(cfgheadername);
 
         if (cf_hdr == NULL) {
             return NULL;
@@ -2207,7 +2221,7 @@ static int in_calyptia_fleet_init(struct flb_input_instance *in,
     /* Load the config map */
     ret = flb_input_config_map_set(in, (void *) ctx);
     if (ret == -1) {
-        flb_free(ctx);
+        in_calyptia_fleet_destroy(ctx);
         flb_plg_error(in, "unable to load configuration");
         return -1;
     }
@@ -2218,7 +2232,7 @@ static int in_calyptia_fleet_init(struct flb_input_instance *in,
 
         if (tmpdir == NULL) {
             flb_plg_error(in, "unable to find temporary directory (%%TEMP%%).");
-            flb_free(ctx);
+            in_calyptia_fleet_destroy(ctx);
             return -1;
         }
 
@@ -2226,7 +2240,7 @@ static int in_calyptia_fleet_init(struct flb_input_instance *in,
 
         if (ctx->config_dir == NULL) {
             flb_plg_error(in, "unable to allocate config-dir.");
-            flb_free(ctx);
+            in_calyptia_fleet_destroy(ctx);
             return -1;
         }
         flb_sds_printf(&ctx->config_dir, "%s" PATH_SEPARATOR "%s", tmpdir, "calyptia-fleet");
@@ -2244,7 +2258,7 @@ static int in_calyptia_fleet_init(struct flb_input_instance *in,
 
     if (!ctx->u) {
         flb_plg_error(ctx->ins, "could not initialize upstream");
-        flb_free(ctx);
+        in_calyptia_fleet_destroy(ctx);
         return -1;
     }
 
@@ -2266,6 +2280,7 @@ static int in_calyptia_fleet_init(struct flb_input_instance *in,
     /* create fleet directory before creating the fleet header. */
     if (create_fleet_directory(ctx) != 0) {
         flb_plg_error(ctx->ins, "unable to create fleet directories");
+        in_calyptia_fleet_destroy(ctx);
         return -1;
     }
 
@@ -2294,8 +2309,7 @@ static int in_calyptia_fleet_init(struct flb_input_instance *in,
 
     if (ret == -1) {
         flb_plg_error(ctx->ins, "could not initialize collector for fleet input plugin");
-        flb_upstream_destroy(ctx->u);
-        flb_free(ctx);
+        in_calyptia_fleet_destroy(ctx);
         return -1;
     }
 
@@ -2318,10 +2332,11 @@ static void cb_in_calyptia_fleet_resume(void *data, struct flb_config *config)
     flb_input_collector_resume(ctx->collect_fd, ctx->ins);
 }
 
-static int in_calyptia_fleet_exit(void *data, struct flb_config *config)
+static void in_calyptia_fleet_destroy(struct flb_in_calyptia_fleet_config *ctx)
 {
-    (void) *config;
-    struct flb_in_calyptia_fleet_config *ctx = (struct flb_in_calyptia_fleet_config *)data;
+    if (!ctx) {
+        return;
+    }
 
     if (ctx->fleet_url) {
         flb_sds_destroy(ctx->fleet_url);
@@ -2335,10 +2350,21 @@ static int in_calyptia_fleet_exit(void *data, struct flb_config *config)
         flb_sds_destroy(ctx->fleet_id);
     }
 
-    flb_input_collector_delete(ctx->collect_fd, ctx->ins);
-    flb_upstream_destroy(ctx->u);
-    flb_free(ctx);
+    if (ctx->collect_fd >= 0) {
+        flb_input_collector_delete(ctx->collect_fd, ctx->ins);
+    }
 
+    if (ctx->u) {
+        flb_upstream_destroy(ctx->u);
+    }
+
+    flb_free(ctx);
+}
+
+static int in_calyptia_fleet_exit(void *data, struct flb_config *config)
+{
+    (void) *config;
+    in_calyptia_fleet_destroy((struct flb_in_calyptia_fleet_config *)data);
     return 0;
 }
 
